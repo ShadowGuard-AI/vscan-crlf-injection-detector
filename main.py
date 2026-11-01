@@ -45,20 +45,24 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
     def reflected(response, name, value):
         header_names = [key.lower() for key in response.headers.keys()]
         if name.lower() in header_names:
+            # The first positive ends the whole run. When a parameter reflects, the header tests below never execute, so a report of one finding is not evidence the other surface was clean.
             return True
         for header_value in response.headers.values():
+            # The value half of this test is a plain substring search for a short word across every response header. On the header test the word is test, which turns up inside unrelated values often enough that this branch can claim a reflection the server never performed.
             if value in str(header_value):
                 return True
         return False
 
     try:
         parsed_url = urlparse(url)
+        # Rebuilding the base drops the target URL's own query string and fragment. Parameters already present in the address the operator gave me are not carried into the parameter tests; only the -p values are ever sent.
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
 
         # Prepare headers
         req_headers = {"User-Agent": user_agent}
         if headers:
             try:
+                # I split on a literal backslash n, because that is what the command line examples pass. A caller who supplies real newline characters, as the help text's own example suggests, hands me one long line that parses as a single header or none.
                 for header_line in headers.split("\\n"):
                     if ":" in header_line:
                         header_name, header_value = header_line.split(":", 1)
@@ -86,6 +90,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
                     injected_params[param_name] = injected_value
 
                     # Encode the parameters
+                    # urlencode percent encodes the percent signs in my payload, so what reaches the server is the double encoded form. A server that decodes its parameters once sees the literal text of the payload, not a carriage return, and only a server that decodes twice ever gives me the split I am testing for.
                     encoded_params = urlencode(injected_params)
 
                     full_url = f"{base_url}?{encoded_params}"
