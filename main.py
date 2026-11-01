@@ -36,8 +36,20 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
         user_agent (str, optional): Custom User-Agent header. Defaults to "vscan-crlf-injection-detector/1.0".
 
     Returns:
-        bool: True if a potential CRLF injection vulnerability is detected, False otherwise.
+        bool: True if a potential CRLF injection vulnerability is detected,
+        False if tests ran and none detected it, or None if a request failed
+        or no test ran, so no clean verdict can be given.
     """
+    tests_run = 0
+
+    def reflected(response, name, value):
+        header_names = [key.lower() for key in response.headers.keys()]
+        if name.lower() in header_names:
+            return True
+        for header_value in response.headers.values():
+            if value in str(header_value):
+                return True
+        return False
 
     try:
         parsed_url = urlparse(url)
@@ -55,7 +67,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
                         logging.warning(f"Invalid header format: {header_line}. Skipping.")
             except Exception as e:
                 logging.error(f"Error parsing headers: {e}")
-                return False
+                return None
 
 
         # Test with parameters
@@ -80,9 +92,9 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                     try:
                         response = requests.get(full_url, headers=req_headers, timeout=timeout, allow_redirects=False)
-                        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+                        tests_run += 1
 
-                        if "X-Custom-Header: Injected" in response.text or "X-Custom-Header: Injected" in response.headers:
+                        if reflected(response, "X-Custom-Header", "Injected"):
                             logging.warning(f"Potential CRLF injection vulnerability detected in parameter '{param_name}' at URL: {full_url}")
                             return True
                         else:
@@ -90,11 +102,11 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                     except requests.exceptions.RequestException as e:
                          logging.error(f"Request failed for URL {full_url}: {e}")
-                         return False
+                         return None
 
             except Exception as e:
                 logging.error(f"Error processing parameters: {e}")
-                return False
+                return None
         
         # Test with custom headers
         if headers:
@@ -109,9 +121,9 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                     try:
                         response = requests.get(url, headers=injected_headers, timeout=timeout, allow_redirects=False)
-                        response.raise_for_status()
+                        tests_run += 1
 
-                        if "X-Injected-Header: test" in response.text or "X-Injected-Header: test" in response.headers:
+                        if reflected(response, "X-Injected-Header", "test"):
                             logging.warning(f"Potential CRLF injection vulnerability detected in header '{header_name}' at URL: {url}")
                             return True
                         else:
@@ -119,12 +131,15 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                     except requests.exceptions.RequestException as e:
                         logging.error(f"Request failed for URL {url} with injected header '{header_name}': {e}")
-                        return False
+                        return None
+        if tests_run == 0:
+            logging.error("No CRLF tests ran: no parameters or headers were supplied to test.")
+            return None
         return False
 
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
-        return False
+        return None
 
 
 def main():
@@ -160,7 +175,11 @@ def main():
             sys.exit(1)
 
     try:
-        if inject_crlf(args.url, args.params, args.headers, args.crlf_payload, args.timeout, args.user_agent):
+        result = inject_crlf(args.url, args.params, args.headers, args.crlf_payload, args.timeout, args.user_agent)
+        if result is None:
+            print("CRLF check failed: a request failed or no test ran, so no verdict could be made.")
+            sys.exit(1)
+        if result:
             print("Potential CRLF injection vulnerability detected!")
         else:
             print("No CRLF injection vulnerability detected.")

@@ -1,5 +1,5 @@
 # vscan-crlf-injection-detector
-Identifies potential CRLF injection vulnerabilities by injecting CRLF sequences in headers and parameters and monitoring server responses. - Focused on Lightweight web application vulnerability scanning focused on identifying common misconfigurations and publicly known vulnerabilities
+Identifies potential CRLF injection vulnerabilities by injecting CRLF sequences in headers and parameters and checking whether the injected header name or value appears in the response headers. If a request fails, or no parameter or header test runs, the tool prints a failure line and exits non-zero instead of reporting a clean verdict. - Focused on Lightweight web application vulnerability scanning focused on identifying common misconfigurations and publicly known vulnerabilities
 
 ## Install
 `git clone https://github.com/ShadowGuardAI/vscan-crlf-injection-detector`
