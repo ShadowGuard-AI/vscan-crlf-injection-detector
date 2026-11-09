@@ -2,7 +2,8 @@ import argparse
 import requests
 import logging
 import sys
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse, urlencode, parse_qsl, quote
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,6 +24,10 @@ def setup_argparse():
     parser.add_argument("--user-agent", help="Custom User-Agent header", default="vscan-crlf-injection-detector/1.0")
     return parser
 
+def split_header_lines(headers):
+    """Split a headers argument on a literal backslash-n or a real newline."""
+    return [part for part in re.split(r"\\n|\r?\n", headers) if part.strip()]
+
 def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=10, user_agent="vscan-crlf-injection-detector/1.0"):
     """
     Injects CRLF sequences into headers and parameters of a URL and monitors server responses.
@@ -41,29 +46,29 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
         or no test ran, so no clean verdict can be given.
     """
     tests_run = 0
+    found = False
 
     def reflected(response, name, value):
-        header_names = [key.lower() for key in response.headers.keys()]
-        if name.lower() in header_names:
-            # The first positive ends the whole run. When a parameter reflects, the header tests below never execute, so a report of one finding is not evidence the other surface was clean.
-            return True
-        for header_value in response.headers.values():
-            # The value half of this test is a plain substring search for a short word across every response header. On the header test the word is test, which turns up inside unrelated values often enough that this branch can claim a reflection the server never performed.
-            if value in str(header_value):
+        # A reflection counts only when the injected header name appears
+        # with the injected value in that same response header. Matching
+        # a short value as a substring of unrelated headers (for example
+        # "test" inside a Server banner) is not a reflection.
+        for key, header_value in response.headers.items():
+            if key.lower() == name.lower() and value in str(header_value):
                 return True
         return False
 
     try:
         parsed_url = urlparse(url)
-        # Rebuilding the base drops the target URL's own query string and fragment. Parameters already present in the address the operator gave me are not carried into the parameter tests; only the -p values are ever sent.
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+        original_params = dict(parse_qsl(parsed_url.query, keep_blank_values=True))
 
         # Prepare headers
         req_headers = {"User-Agent": user_agent}
         if headers:
             try:
                 # I split on a literal backslash n, because that is what the command line examples pass. A caller who supplies real newline characters, as the help text's own example suggests, hands me one long line that parses as a single header or none.
-                for header_line in headers.split("\\n"):
+                for header_line in split_header_lines(headers):
                     if ":" in header_line:
                         header_name, header_value = header_line.split(":", 1)
                         req_headers[header_name.strip()] = header_value.strip()
@@ -74,11 +79,11 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
                 return None
 
 
-        # Test with parameters
-        if params:
+        # Test with parameters (operator supplied and any in the URL itself)
+        if params or original_params:
             try:
-                param_dict = {}
-                for param_pair in params.split("&"):
+                param_dict = dict(original_params)
+                for param_pair in (params.split("&") if params else []):
                     if "=" in param_pair:
                         param_name, param_value = param_pair.split("=", 1)
                         param_dict[param_name.strip()] = param_value.strip()
@@ -90,8 +95,13 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
                     injected_params[param_name] = injected_value
 
                     # Encode the parameters
-                    # urlencode percent encodes the percent signs in my payload, so what reaches the server is the double encoded form. A server that decodes its parameters once sees the literal text of the payload, not a carriage return, and only a server that decodes twice ever gives me the split I am testing for.
                     encoded_params = urlencode(injected_params)
+                    # urlencode percent encodes the payload percent signs,
+                    # which would send a double encoded payload. Restore
+                    # the payload encoding so the server decodes it once.
+                    encoded_payload = quote(crlf_payload, safe="")
+                    if encoded_payload != crlf_payload:
+                        encoded_params = encoded_params.replace(encoded_payload, crlf_payload)
 
                     full_url = f"{base_url}?{encoded_params}"
 
@@ -101,7 +111,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                         if reflected(response, "X-Custom-Header", "Injected"):
                             logging.warning(f"Potential CRLF injection vulnerability detected in parameter '{param_name}' at URL: {full_url}")
-                            return True
+                            found = True
                         else:
                              logging.info(f"Parameter '{param_name}' seems safe at URL: {full_url}")
 
@@ -115,7 +125,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
         
         # Test with custom headers
         if headers:
-           for header_line in headers.split("\\n"):
+           for header_line in split_header_lines(headers):
                 if ":" in header_line:
                     header_name, header_value = header_line.split(":", 1)
 
@@ -130,7 +140,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
 
                         if reflected(response, "X-Injected-Header", "test"):
                             logging.warning(f"Potential CRLF injection vulnerability detected in header '{header_name}' at URL: {url}")
-                            return True
+                            found = True
                         else:
                             logging.info(f"Header '{header_name}' seems safe at URL: {url}")
 
@@ -140,7 +150,7 @@ def inject_crlf(url, params=None, headers=None, crlf_payload="%0d%0a", timeout=1
         if tests_run == 0:
             logging.error("No CRLF tests ran: no parameters or headers were supplied to test.")
             return None
-        return False
+        return found
 
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
@@ -172,7 +182,7 @@ def main():
 
     if args.headers:
         try:
-            for header_line in args.headers.split("\\n"):
+            for header_line in split_header_lines(args.headers):
                 if ":" not in header_line:
                     raise ValueError("Invalid header format. Use 'Header: Value'.")
         except ValueError as e:
